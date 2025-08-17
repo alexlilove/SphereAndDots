@@ -1,0 +1,576 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1" />
+  <title>Интерактивная прозрачная сфера</title>
+  <style>
+    :root {
+      --bg: #0b1020;
+      --panel: rgba(20,26,48,.7);
+      --txt: #e7eaf6;
+    }
+    html, body { height: 100%; margin: 0; }
+    body { background: var(--bg); color: var(--txt); overflow: hidden; font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, "Helvetica Neue", Arial, "Noto Sans", sans-serif; }
+    canvas { display: block; }
+    .banner { position: absolute; left: 50%; top: 60px; transform: translateX(-50%); z-index: 10; pointer-events: auto; }
+    .banner .card { background: var(--panel); border: 1px solid rgba(255,255,255,.12); border-radius: 12px; width: 250px; padding: 10px 14px; font-size: 13px; line-height: 1.35; box-shadow: 0 10px 30px rgba(0,0,0,.25); position: relative; }
+    .banner .close-btn { position: absolute; top: 11px; right: 8px; cursor: pointer; font-weight: bold; color: #fff; }
+    .label { font-weight: 700; font-size: 12px; color: #fff; text-shadow: 0 0 6px rgba(0,0,0,.7); user-select: none; white-space: nowrap; }
+    
+    .grid-btn {
+        background: var(--panel);
+        color: #ddeeff;
+        border: 1px solid #556677;
+        border-radius: 12px;
+        padding: 8px 10px;
+        font-size: 14px;
+        line-height: 1;
+        cursor: pointer;
+        position: absolute;
+        left: 290px;
+        box-shadow: 0 10px 30px rgba(0,0,0,.25);
+        user-select: none;
+        transition: transform .08s ease;
+    }
+    .grid-btn.active {
+        background: rgba(58, 139, 255, 0.5);
+    }
+
+    .toolbar { position: absolute; top: 10px; right: 10px; z-index: 20; display: flex; gap: 8px; }
+    .tool-btn { background: var(--panel); border: 1px solid rgba(255,255,255,.14); border-radius: 12px; padding: 8px 10px; font-size: 18px; line-height: 1; cursor: pointer; box-shadow: 0 10px 30px rgba(0,0,0,.25); user-select: none; transition: transform .08s ease; }
+    .tool-btn:active { transform: scale(0.96); }
+    .tool-btn[disabled] { opacity: .5; cursor: default; }
+    
+    .mode-switcher { position: absolute; bottom: 20px; left: 20px; z-index: 20; display: flex; gap: 8px; }
+    .mode-btn { background: var(--panel); color: #ddeeff; border: 1px solid #556677; border-radius: 12px; padding: 8px 10px; font-size: 14px; line-height: 1; cursor: pointer; box-shadow: 0 10px 30px rgba(0,0,0,.25); user-select: none; transition: transform .08s ease; }
+    .mode-btn.active { background: rgba(58, 139, 255, 0.5); }
+  </style>
+</head>
+<body>
+  <div class="banner"><div class="card">
+    <div class="close-btn">×</div>
+    • Добавляйте точки нажатием и удаляйте удержанием.<br>
+    • Выберите пару точек — через них пройдет большая окружность или отрезок (выберите режим).<br>
+    • При двойном тапе по точке удаляются связанные с ней окружности/отрезки.
+  </div></div>
+
+  <div class="toolbar" aria-label="Инструменты">
+    <button class="tool-btn" id="btn-undo" title="Шаг назад (↩️)">↩️</button>
+    <button class="tool-btn" id="btn-restart" title="Рестарт сцены (🔄)">🔄</button>
+  </div>
+
+  <div class="mode-switcher">
+    <button class="mode-btn active" id="btn-mode-circles" title="Режим окружностей">Окружности</button>
+    <button class="mode-btn" id="btn-mode-segments" title="Режим отрезков">Отрезки</button>
+    <button class="grid-btn" id="btn-grid" title="Сетка">Сетка</button>
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.161.0/build/three.module.js",
+      "three/examples/jsm/": "https://unpkg.com/three@0.161.0/examples/jsm/"
+    }
+  }
+  </script>
+
+  <script type="module">
+    let gridLines = [];
+    let isGridVisible = false;
+    const GRID_COLOR = 0x666666;
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+    import { CSS2DRenderer, CSS2DObject } from 'three/examples/jsm/renderers/CSS2DRenderer.js';
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+    const R = 1;
+    camera.position.set(0, 0, 3);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    const labelRenderer = new CSS2DRenderer();
+    labelRenderer.setSize(window.innerWidth, window.innerHeight);
+    labelRenderer.domElement.style.position = 'absolute';
+    labelRenderer.domElement.style.top = '0';
+    labelRenderer.domElement.style.left = '0';
+    labelRenderer.domElement.style.pointerEvents = 'none';
+    document.body.appendChild(labelRenderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+    controls.enablePan = false;
+
+    const sphereGeo = new THREE.SphereGeometry(R, 64, 64);
+    const sphereMat = new THREE.MeshPhongMaterial({ color: 0x3a8bff, transparent: true, opacity: 0.15, side: THREE.DoubleSide });
+    const sphere = new THREE.Mesh(sphereGeo, sphereMat);
+    scene.add(sphere);
+
+    scene.add(new THREE.AmbientLight(0xffffff, 0.55));
+    const dir = new THREE.DirectionalLight(0xffffff, 0.9);
+    dir.position.set(5, 5, 6);
+    scene.add(dir);
+
+    const COLOR_RED = 0xff3333;
+    const COLOR_BLUE = 0x3399ff;
+    const COLOR_GREEN = 0x33ff33;
+    const COLOR_RED_DIM = 0xdd1111;
+    const COLOR_BLUE_DIM = 0x224466;
+    const COLOR_GREEN_DIM = 0x225522;
+    const COLOR_YELLOW = 0xffff00;
+
+    const circleColors = [0xffaa00, 0xaa00ff, 0x00ffaa, 0xffff00, 0xff00aa];
+    let circleColorIndex = 0;
+
+    const points = [];
+    let nextChar = 'A'.charCodeAt(0);
+    const selectedPairs = [];
+    const circles = [];
+    const segments = [];
+    let currentMode = 'circles'; // 'circles' or 'segments'
+
+    const history = [];
+    function saveState() {
+      history.push({
+        points: points.map(p => ({
+          position: p.mesh.position.clone(),
+          labelText: p.labelText,
+          baseColor: p.baseColor
+        })),
+        circles: circles.map(c => ({
+          points: [...c.points],
+          color: c.circle.material.color.getHex()
+        })),
+        segments: segments.map(s => ({
+          points: [...s.points],
+          color: s.segment.material.color.getHex()
+        }))
+      });
+      updateUndoDisabled();
+    }
+    
+    function createGrid() {
+        // Удаляем старую сетку, если она есть
+        removeGrid();
+        
+        // Создаем меридианы (долготы)
+        for (let lon = 0; lon < 360; lon += 15) {
+            const points = [];
+            for (let lat = -90; lat <= 90; lat += 5) {
+                const phi = THREE.MathUtils.degToRad(90 - lat);
+                const theta = THREE.MathUtils.degToRad(lon);
+                const x = R * Math.sin(phi) * Math.cos(theta);
+                const y = R * Math.cos(phi);
+                const z = R * Math.sin(phi) * Math.sin(theta);
+                points.push(new THREE.Vector3(x, y, z));
+            }
+            const geometry = new THREE.BufferGeometry().setFromPoints(points);
+            const line = new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: GRID_COLOR, transparent: true, opacity: 0.5 }));
+            scene.add(line);
+            gridLines.push(line);
+        }
+        
+        // Создаем параллели (широты)
+        for (let lat = -75; lat <= 75; lat += 15) {
+            const points = [];
+            for (let lon = 0; lon <= 360; lon += 5) {
+                const phi = THREE.MathUtils.degToRad(90 - lat);
+                const theta = THREE.MathUtils.degToRad(lon);
+                const x = R * Math.sin(phi) * Math.cos(theta);
+                const y = R * Math.cos(phi);
+                const z = R * Math.sin(phi) * Math.sin(theta);
+                points.push(new THREE.Vector3(x, y, z));
+            }
+            const geometry = new THREE.BufferGeometry().setFromPoints(points);
+            const line = new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: GRID_COLOR, transparent: true, opacity: 0.5 }));
+            scene.add(line);
+            gridLines.push(line);
+        }
+    }
+
+    function removeGrid() {
+        gridLines.forEach(line => {
+            scene.remove(line);
+            line.geometry.dispose();
+            line.material.dispose();
+        });
+        gridLines = [];
+    }
+
+    function toggleGrid() {
+        isGridVisible = !isGridVisible;
+        document.getElementById('btn-grid').classList.toggle('active', isGridVisible);
+        
+        if (isGridVisible) {
+            createGrid();
+        } else {
+            removeGrid();
+        }
+    }
+
+    // Добавьте обработчик для кнопки сетки
+    document.getElementById('btn-grid').addEventListener('click', toggleGrid);
+
+    function undoLastAction() {
+      if (history.length === 0) return;
+      
+      // Clear current state
+      points.forEach(p => {
+        scene.remove(p.mesh);
+        p.mesh.remove(p.labelObj);
+      });
+      points.length = 0;
+      
+      circles.forEach(c => {
+        scene.remove(c.circle);
+        c.circle.geometry.dispose();
+        c.circle.material.dispose();
+      });
+      circles.length = 0;
+      
+      segments.forEach(s => {
+        scene.remove(s.segment);
+        s.segment.geometry.dispose();
+        s.segment.material.dispose();
+      });
+      segments.length = 0;
+      
+      // Restore previous state
+      const state = history.pop();
+      nextChar = 'A'.charCodeAt(0);
+      
+      // Restore points
+      state.points.forEach(pState => {
+        const forcedText = pState.labelText === '' ? '' : String.fromCharCode(nextChar++);
+        addPointAt(pState.position, forcedText, pState.baseColor);
+      });
+      
+      // Restore circles
+      state.circles.forEach(cState => {
+        const color = cState.color;
+        const circle = drawGreatCircle(cState.points[0], cState.points[1], color);
+        if (circle) {
+          const pair = { points: [cState.points[0], cState.points[1]], circle };
+          circles.push(pair);
+          pair.points.forEach(i => points[i].pairs.push(pair));
+        }
+      });
+      
+      // Restore segments
+      state.segments.forEach(sState => {
+        const color = sState.color;
+        const segment = drawSegment(sState.points[0], sState.points[1], color);
+        if (segment) {
+          const pair = { points: [sState.points[0], sState.points[1]], segment };
+          segments.push(pair);
+          pair.points.forEach(i => points[i].pairs.push(pair));
+        }
+      });
+      
+      updateUndoDisabled();
+    }
+
+    function updateUndoDisabled(){
+      const btn = document.getElementById('btn-undo');
+      if (!btn) return;
+      btn.disabled = history.length === 0;
+    }
+
+    function makeLabel(text){
+      const el = document.createElement('div');
+      el.className = 'label';
+      el.textContent = text;
+      return el;
+    }
+
+    function addPointAt(pos, forcedText=null, forcedColor=null){
+      const onSurface = pos.length() > R * 0.5;
+      const p = onSurface ? pos.clone().normalize().multiplyScalar(R) : pos.clone();
+      const geom = new THREE.SphereGeometry(0.025, 16, 16);
+      const mat = new THREE.MeshBasicMaterial({ color: forcedColor ?? COLOR_RED });
+      const mesh = new THREE.Mesh(geom, mat);
+      mesh.position.copy(p);
+      scene.add(mesh);
+
+      const labelText = forcedText ?? String.fromCharCode(nextChar++);
+      const labelEl = makeLabel(labelText);
+      const labelObj = new CSS2DObject(labelEl);
+      labelObj.position.set(0.06, 0.06, 0);
+      mesh.add(labelObj);
+
+      const entry = { mesh, labelObj, labelEl, labelText, isSelected:false, baseColor: forcedColor ?? COLOR_RED, pairs: [] };
+      points.push(entry);
+      return entry;
+    }
+
+    function removePointAtIndex(idx){
+      if (idx < 0 || idx >= points.length) return;
+      const point = points[idx];
+      // remove circles and segments that use this point
+      point.pairs.forEach(pair => {
+        if (pair.circle) removeCircle(pair);
+        if (pair.segment) removeSegment(pair);
+      });
+      scene.remove(point.mesh);
+      point.mesh.remove(point.labelObj);
+      points.splice(idx,1);
+    }
+
+    function removeConnectionsForPoint(idx) {
+      if (idx < 0 || idx >= points.length) return;
+      const point = points[idx];
+      // Create a copy of the pairs array to avoid modification during iteration
+      const pairsToRemove = [...point.pairs];
+      pairsToRemove.forEach(pair => {
+        if (pair.circle) removeCircle(pair);
+        if (pair.segment) removeSegment(pair);
+      });
+    }
+
+    function refreshPointColor(idx){
+      const p = points[idx];
+      if (!p) return;
+      const base = p.isSelected ? COLOR_BLUE : p.baseColor;
+      const camDir = camera.position.clone().normalize();
+      const normal = p.mesh.getWorldPosition(new THREE.Vector3()).normalize();
+      const visible = normal.dot(camDir) > 0;
+      let dimColor;
+      if (p.isSelected) dimColor = COLOR_BLUE_DIM;
+      else if (p.baseColor === COLOR_BLUE) dimColor = COLOR_BLUE_DIM;
+      else if (p.baseColor === COLOR_GREEN) dimColor = COLOR_GREEN_DIM;
+      else dimColor = COLOR_RED_DIM;
+      const final = visible ? base : dimColor;
+      p.mesh.material.color.set(final);
+      p.labelEl.style.color = visible ? '#ffffff' : '#8a8f9f';
+    }
+
+    function refreshAllColors(){
+      for (let i=0;i<points.length;i++) refreshPointColor(i);
+    }
+
+    function drawGreatCircle(i1, i2, color){
+      const a = points[i1]?.mesh.position.clone().normalize();
+      const b = points[i2]?.mesh.position.clone().normalize();
+      if (!a || !b) return null;
+      const n = new THREE.Vector3().crossVectors(a,b);
+      if (n.lengthSq() < 1e-8) return null;
+      n.normalize();
+      const u = a.clone();
+      const v = new THREE.Vector3().crossVectors(n,u).normalize();
+      const seg = 256; const arr = new Array(seg).fill(0).map((_,i)=>{
+        const t = i/seg * Math.PI*2;
+        return u.clone().multiplyScalar(Math.cos(t)).add(v.clone().multiplyScalar(Math.sin(t))).multiplyScalar(R);
+      });
+      const geom = new THREE.BufferGeometry().setFromPoints(arr);
+      const circle = new THREE.LineLoop(geom, new THREE.LineBasicMaterial({ color }));
+      scene.add(circle);
+      return circle;
+    }
+
+    function drawSegment(i1, i2, color){
+      const a = points[i1]?.mesh.position;
+      const b = points[i2]?.mesh.position;
+      if (!a || !b) return null;
+      
+      const geom = new THREE.BufferGeometry().setFromPoints([a, b]);
+      const segment = new THREE.Line(geom, new THREE.LineBasicMaterial({ color }));
+      scene.add(segment);
+      return segment;
+    }
+
+    function removeCircle(pair){
+      if (pair.circle){
+        scene.remove(pair.circle);
+        pair.circle.geometry.dispose();
+        pair.circle.material.dispose();
+      }
+      const idx = circles.indexOf(pair);
+      if (idx !== -1) circles.splice(idx,1);
+      pair.points.forEach(p => {
+        const pi = points[p];
+        if (pi) pi.pairs = pi.pairs.filter(pr => pr !== pair);
+      });
+    }
+
+    function removeSegment(pair){
+      if (pair.segment){
+        scene.remove(pair.segment);
+        pair.segment.geometry.dispose();
+        pair.segment.material.dispose();
+      }
+      const idx = segments.indexOf(pair);
+      if (idx !== -1) segments.splice(idx,1);
+      pair.points.forEach(p => {
+        const pi = points[p];
+        if (pi) pi.pairs = pi.pairs.filter(pr => pr !== pair);
+      });
+    }
+
+    function toggleSelectionByIndex(idx){
+      if (idx < 0 || idx >= points.length) return;
+      const p = points[idx];
+      p.isSelected = !p.isSelected;
+      if (p.isSelected){
+        const selected = points.map((q,i)=>q.isSelected?i:null).filter(i=>i!==null);
+        if (selected.length === 2){
+          saveState();
+          if (currentMode === 'circles') {
+            const color = circleColors[circleColorIndex % circleColors.length];
+            circleColorIndex++;
+            const circle = drawGreatCircle(selected[0], selected[1], color);
+            if (circle){
+              const pair = { points: [selected[0], selected[1]], circle };
+              circles.push(pair);
+              pair.points.forEach(i => points[i].pairs.push(pair));
+            }
+          } else {
+            const segment = drawSegment(selected[0], selected[1], COLOR_YELLOW);
+            if (segment){
+              const pair = { points: [selected[0], selected[1]], segment };
+              segments.push(pair);
+              pair.points.forEach(i => points[i].pairs.push(pair));
+            }
+          }
+          selected.forEach(i => points[i].isSelected=false);
+        }
+      }
+    }
+
+    function setMode(mode) {
+      currentMode = mode;
+      document.getElementById('btn-mode-circles').classList.toggle('active', mode === 'circles');
+      document.getElementById('btn-mode-segments').classList.toggle('active', mode === 'segments');
+    }
+
+    addPointAt(new THREE.Vector3(0, 0, 0), '', COLOR_GREEN);
+
+    const raycaster = new THREE.Raycaster();
+    const ndc = new THREE.Vector2();
+    let isDown = false, moved = false, startX=0, startY=0;
+    const DRAG_PX = 6;
+    let downHitPointIndex = -1;
+    let downHitSphere = false;
+    let tapTimer = null;
+    let holdTimer = null;
+
+    function setNDCFromEvent(e){
+      const rect = renderer.domElement.getBoundingClientRect();
+      const x = (('clientX' in e) ? e.clientX : e.touches?.[0]?.clientX) ?? 0;
+      const y = (('clientY' in e) ? e.clientY : e.touches?.[0]?.clientY) ?? 0;
+      ndc.x = ((x - rect.left) / rect.width) * 2 - 1;
+      ndc.y = -((y - rect.top) / rect.height) * 2 + 1;
+      return { x, y };
+    }
+
+    function pickPoint(){
+      raycaster.setFromCamera(ndc, camera);
+      const objs = points.map(p=>p.mesh);
+      const hit = raycaster.intersectObjects(objs, false);
+      return hit.length ? points.findIndex(p=>p.mesh===hit[0].object) : -1;
+    }
+    function pickSphere(){
+      raycaster.setFromCamera(ndc, camera);
+      const hit = raycaster.intersectObject(sphere, false);
+      return hit.length ? hit[0].point.clone() : null;
+    }
+
+    function onPointerDown(e){
+      isDown = true; moved = false;
+      const p = setNDCFromEvent(e); startX = p.x; startY = p.y;
+      downHitPointIndex = pickPoint();
+      downHitSphere = downHitPointIndex === -1 && !!pickSphere();
+      
+      if (downHitPointIndex !== -1) {
+        holdTimer = setTimeout(() => {
+          if (isDown && !moved && downHitPointIndex !== -1) {
+            saveState();
+            removePointAtIndex(downHitPointIndex);
+            downHitPointIndex = -1;
+          }
+        }, 800); // 800ms hold to delete point
+      }
+    }
+
+    function onPointerMove(e){
+      if (!isDown) return;
+      const p = setNDCFromEvent(e);
+      if (!moved && Math.hypot(p.x-startX, p.y-startY) > DRAG_PX){
+        moved = true;
+        if (holdTimer) {
+          clearTimeout(holdTimer);
+          holdTimer = null;
+        }
+      }
+    }
+
+    function onPointerUp(e){
+      if (!isDown) return;
+      isDown = false;
+      
+      if (holdTimer) {
+        clearTimeout(holdTimer);
+        holdTimer = null;
+      }
+      
+      setNDCFromEvent(e);
+      if (!moved){
+        if (downHitPointIndex !== -1){
+          if (tapTimer && tapTimer.idx === downHitPointIndex){
+            // double tap → remove connections for this point
+            saveState();
+            removeConnectionsForPoint(downHitPointIndex);
+            clearTimeout(tapTimer.timer);
+            tapTimer = null;
+          } else {
+            toggleSelectionByIndex(downHitPointIndex);
+            tapTimer = { idx: downHitPointIndex, timer: setTimeout(()=>tapTimer=null, 400) };
+          }
+        } else if (downHitSphere){
+          const hit = pickSphere();
+          if (hit){ 
+            saveState();
+            addPointAt(hit); 
+          }
+        }
+      }
+      downHitPointIndex = -1; downHitSphere = false; moved = false;
+    }
+
+    const el = renderer.domElement;
+    el.addEventListener('pointerdown', onPointerDown, { passive: true });
+    el.addEventListener('pointermove', onPointerMove, { passive: true });
+    el.addEventListener('pointerup', onPointerUp, { passive: true });
+
+    function onResize(){
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      labelRenderer.setSize(window.innerWidth, window.innerHeight);
+    }
+    window.addEventListener('resize', onResize);
+
+    function animate(){
+      requestAnimationFrame(animate);
+      controls.update();
+      refreshAllColors();
+      renderer.render(scene, camera);
+      labelRenderer.render(scene, camera);
+    }
+    animate();
+
+    document.querySelector('.close-btn').addEventListener('click', () => {
+      document.querySelector('.banner').style.display = 'none';
+    });
+
+    document.getElementById('btn-restart').addEventListener('click', ()=>location.reload());
+    document.getElementById('btn-undo').addEventListener('click', undoLastAction);
+    document.getElementById('btn-mode-circles').addEventListener('click', () => setMode('circles'));
+    document.getElementById('btn-mode-segments').addEventListener('click', () => setMode('segments'));
+  </script>
+</body>
+</html>
